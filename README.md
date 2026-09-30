@@ -144,7 +144,7 @@ Set the Supabase Auth Site URL to the deployed Vercel origin and add `<your-verc
 - **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 - **Environment variables:**
   - `DEMO_MODE` — `true` to run without an AI provider; set `false` only when provider credentials and a model are configured.
-  - `FRONTEND_URL` — exact Vercel origin, such as `https://your-project.vercel.app`; multiple exact origins may be comma-separated. Do not include a path. When unset, CORS allows only the two local Vite origins for development.
+  - `FRONTEND_URL` — optional additional exact frontend origins; separate multiple origins with commas and omit paths. The two ScamShield Vercel origins and the local Vite origins are allowed by default. Do not use `*`.
   - `AI_API_KEY` — optional backend-only provider credential; required only when `DEMO_MODE=false`.
   - `AI_MODEL` — provider model name; required only when `DEMO_MODE=false`.
   - `AI_API_BASE_URL` — optional OpenAI-compatible API base URL; defaults to `https://api.openai.com/v1`.

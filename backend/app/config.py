@@ -13,10 +13,18 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+VERCEL_FRONTEND_ORIGINS = [
+    "https://scamshield-ai-j7gz.vercel.app",
+    "https://scamshield-ai-j7gz-ed4qkl7s-tarunkataria007s-projects.vercel.app",
+]
+LOCAL_FRONTEND_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
 
 def get_cors_origins() -> list[str]:
-    """Use configured exact deployment origins, or local Vite origins for development."""
-    configured = [origin.strip().rstrip("/") for origin in settings.frontend_url.split(",") if origin.strip()]
-    if configured:
-        return configured
-    return ["http://localhost:5173", "http://127.0.0.1:5173"]
+    """Allow the deployed ScamShield frontends, local Vite, and configured extra origins."""
+    configured = [
+        origin.strip().rstrip("/")
+        for origin in settings.frontend_url.split(",")
+        if origin.strip() and origin.strip() != "*"
+    ]
+    return list(dict.fromkeys([*VERCEL_FRONTEND_ORIGINS, *LOCAL_FRONTEND_ORIGINS, *configured]))
