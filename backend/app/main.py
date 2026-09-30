@@ -4,16 +4,16 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from .analyzer import MessageAnalysis, analyze_demo, analyze_with_ai
-from .config import settings
+from .config import get_cors_origins, settings
 from .url_analyzer import URLAnalysis, analyze_url
 
 app = FastAPI(title="ScamShield AI API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=get_cors_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -29,7 +29,8 @@ class URLAnalysisRequest(BaseModel):
     url: str = Field(min_length=1, max_length=8_192)
 
 
-@app.get("/health")
+@app.get("/health", include_in_schema=False)
+@app.get("/api/health")
 def health():
     return {"status": "ok", "demo_mode": settings.demo_mode}
 

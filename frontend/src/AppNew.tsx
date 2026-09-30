@@ -43,7 +43,7 @@ type HistoryItem = {
   result: ScanResult
 }
 type Page = 'landing' | 'login' | 'signup' | 'forgot-password' | 'reset-password' | 'dashboard' | 'scanner' | 'screenshot' | 'url' | 'history' | 'safety'
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_URL = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '')
 const HISTORY_KEY = 'scamshield.scan-history'
 const SAFETY_CHECKLIST_KEY = 'scamshield.safety-checklist'
 const LOCAL_DEMO_ENABLED = import.meta.env.DEV && import.meta.env.VITE_DEMO_MODE !== 'false'
@@ -182,7 +182,7 @@ export default function AppNew() {
     }).catch(() => { if (active) setAuthReady(true) })
     return () => { active = false; subscription.unsubscribe() }
   }, [])
-  useEffect(() => { let live = true; fetch(`${API_URL}/health`).then(r => { if (live) setApiOnline(r.ok) }).catch(() => { if (live) setApiOnline(false) }); return () => { live = false } }, [])
+  useEffect(() => { let live = true; fetch(`${API_URL}/api/health`).then(r => { if (live) setApiOnline(r.ok) }).catch(() => { if (live) setApiOnline(false) }); return () => { live = false } }, [])
   useEffect(() => {
     setHistory(storageKey ? readHistory(storageKey) : [])
     setHistoryOwner(storageKey)

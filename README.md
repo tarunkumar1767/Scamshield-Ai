@@ -37,6 +37,9 @@ Scam messages often rely on urgency, impersonation, unexpected payment requests,
 │   ├── .env.example
 │   └── requirements.txt
 ├── frontend/
+│   ├── package-lock.json
+│   ├── vite.config.ts
+│   ├── vercel.json
 │   ├── src/
 │   │   ├── components/AuthPage.tsx
 │   │   ├── lib/supabase.ts
@@ -51,7 +54,7 @@ Scam messages often rely on urgency, impersonation, unexpected payment requests,
 
 ## Requirements
 
-- Node.js 20 or newer and npm.
+- Node.js 20.19+ or 22.12+ (required by the locked Vite 8 release) and npm.
 - Python 3.10 or newer and pip.
 - A modern browser. Tesseract.js may need network access on its first use to obtain OCR language data.
 
@@ -116,11 +119,49 @@ AI_MODEL=your-supported-model
 
 The backend sends message text to the configured provider when this mode is enabled. It validates the returned JSON against the expected schema. Without a key/model, the endpoint returns a generic service error and does not reveal configuration details to the browser. Return to `DEMO_MODE=true` to work without a provider.
 
+## Deployment
+
+The frontend and backend are deployed separately. The frontend calls the backend using `VITE_API_URL`; set it to the Render service origin (for example, `https://your-service.onrender.com`, with no trailing slash). In local development, Vite proxies `/api` to `http://127.0.0.1:8000`.
+
+### Frontend — Vercel
+
+- **Root directory:** `frontend`
+- **Install command:** `npm install` (or `npm ci` to install exactly from the committed lockfile)
+- **Build command:** `npm run build`
+- **Output directory:** `dist`
+- `frontend/vercel.json` rewrites client-side routes to the Vite entry page so direct links and refreshes work.
+- **Environment variables:**
+  - `VITE_API_URL` — required; the deployed Render backend origin, without a trailing slash.
+  - `VITE_SUPABASE_URL` — required for real Supabase authentication.
+  - `VITE_SUPABASE_ANON_KEY` — required for real Supabase authentication. Use only the public anon/publishable key; never use a service-role key in the browser.
+
+Set the Supabase Auth Site URL to the deployed Vercel origin and add `<your-vercel-origin>/reset-password` to the allowed redirect URLs. Configure both the production domain and any intended Vercel preview domains explicitly as Supabase redirect URLs.
+
+### Backend — Render
+
+- **Root directory:** `backend`
+- **Build/install command:** `pip install -r requirements.txt`
+- **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- **Environment variables:**
+  - `DEMO_MODE` — `true` to run without an AI provider; set `false` only when provider credentials and a model are configured.
+  - `FRONTEND_URL` — exact Vercel origin, such as `https://your-project.vercel.app`; multiple exact origins may be comma-separated. Do not include a path. When unset, CORS allows only the two local Vite origins for development.
+  - `AI_API_KEY` — optional backend-only provider credential; required only when `DEMO_MODE=false`.
+  - `AI_MODEL` — provider model name; required only when `DEMO_MODE=false`.
+  - `AI_API_BASE_URL` — optional OpenAI-compatible API base URL; defaults to `https://api.openai.com/v1`.
+  - `URL_REPUTATION_API_KEY` — reserved optional variable; the current URL checker is heuristic-only and does not use a reputation service.
+
+The health endpoint is `GET /api/health` (the legacy `GET /health` route remains available). It returns a small JSON status response. The API does not visit submitted URLs.
+
+### Supabase
+
+Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in Vercel's project environment settings for every environment that should use real accounts. These are public frontend configuration values, not service credentials. Keep all AI provider keys and other private credentials in Render environment settings only. If Supabase is not configured, the production app does not enable the local development demo login.
+
 ## API routes
 
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Backend and demo-mode status |
+| `GET` | `/api/health` | Deployment health check |
 | `POST` | `/api/analyze/message` | Analyze `{ "message": "..." }` and return structured risk guidance |
 | `POST` | `/api/analyze/url` | Analyze `{ "url": "https://example.com/path" }` locally without visiting it |
 | `POST` | `/api/scan` | Legacy deterministic demo scan endpoint |
