@@ -205,3 +205,5 @@ FastAPI's generated schema and interactive docs are at `/docs` while the backend
 ## Screenshots
 
 No screenshots are included yet. Add screenshots captured from a running application here when they are available.
+
+<!-- Vercel deployment trigger -->
