@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 from typing import Literal
@@ -7,6 +8,29 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, Field, ValidationError
 
 from .config import settings
+
+
+class AnalysisProviderError(RuntimeError):
+    """Provider failure with a safe, user-facing diagnostic."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _is_supabase_key(value: str) -> bool:
+    if value.lower().startswith(("sb_publishable_", "sb_secret_")):
+        return True
+    parts = value.split(".")
+    if len(parts) != 3:
+        return False
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, UnicodeEncodeError):
+        return False
+    return isinstance(claims, dict) and claims.get("role") in {"anon", "authenticated", "service_role"}
 
 
 class Evidence(BaseModel):
@@ -90,14 +114,27 @@ def analyze_demo(message: str) -> MessageAnalysis:
 
 
 def analyze_with_ai(message: str) -> MessageAnalysis:
-    if not settings.ai_api_key:
-        raise RuntimeError("AI_API_KEY is required when DEMO_MODE=false")
-    if not settings.ai_model:
-        raise RuntimeError("AI_MODEL is required when DEMO_MODE=false")
+    api_key = settings.ai_api_key.strip()
+    model = settings.ai_model.strip()
+    if not api_key:
+        raise AnalysisProviderError(
+            "ai_configuration_missing",
+            "AI_API_KEY is missing from the backend environment. Set it in Render for this deployment, or enable DEMO_MODE.",
+        )
+    if not model:
+        raise AnalysisProviderError(
+            "ai_configuration_missing",
+            "AI_MODEL is missing from the backend environment. Set a supported model in Render, or enable DEMO_MODE.",
+        )
+    if api_key.lower().startswith(("http://", "https://")) or "supabase." in api_key.lower() or _is_supabase_key(api_key):
+        raise AnalysisProviderError(
+            "ai_configuration_invalid",
+            "AI_API_KEY must be an AI-provider credential. Do not use a Supabase project URL, anon/publishable key, or service-role key.",
+        )
 
     schema = MessageAnalysis.model_json_schema()
     payload = {
-        "model": settings.ai_model,
+        "model": model,
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
         "messages": [
@@ -116,18 +153,36 @@ def analyze_with_ai(message: str) -> MessageAnalysis:
     request = Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urlopen(request, timeout=45) as response:
             body = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        raise RuntimeError(f"AI provider returned HTTP {exc.code}") from exc
+        if exc.code in (401, 403):
+            code, message = "ai_authentication_failed", "The configured AI provider rejected authentication. Check AI_API_KEY on the backend."
+        elif exc.code == 404:
+            code, message = "ai_model_or_endpoint_not_found", "The AI provider could not find the configured model or endpoint. Check AI_MODEL and AI_API_BASE_URL."
+        elif exc.code == 429:
+            code, message = "ai_rate_limited", "The AI provider is rate limiting requests. Wait briefly and try again."
+        elif exc.code in (408, 504):
+            code, message = "ai_provider_timeout", "The AI provider did not respond in time. Try again shortly."
+        elif exc.code >= 500:
+            code, message = "ai_provider_unavailable", "The AI provider is temporarily unavailable. Try again shortly."
+        else:
+            code, message = "ai_provider_request_rejected", "The AI provider rejected the request. Check AI_API_BASE_URL and confirm the configured model supports the Chat Completions JSON response format."
+        raise AnalysisProviderError(code, message) from exc
     except (URLError, TimeoutError) as exc:
-        raise RuntimeError("Could not connect to the configured AI provider") from exc
+        raise AnalysisProviderError(
+            "ai_provider_unreachable",
+            "Could not reach the configured AI provider. Check AI_API_BASE_URL and try again.",
+        ) from exc
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RuntimeError("AI provider returned an invalid response") from exc
+        raise AnalysisProviderError(
+            "ai_provider_invalid_response",
+            "The AI provider returned an invalid response. Try again shortly.",
+        ) from exc
 
     try:
         content = body["choices"][0]["message"]["content"]
@@ -136,4 +191,7 @@ def analyze_with_ai(message: str) -> MessageAnalysis:
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         return MessageAnalysis.model_validate_json(content)
     except (KeyError, IndexError, TypeError, AttributeError, ValidationError, json.JSONDecodeError) as exc:
-        raise RuntimeError("AI provider response did not match the required analysis format") from exc
+        raise AnalysisProviderError(
+            "ai_provider_invalid_response",
+            "The AI provider response did not match the required analysis format. Check that the configured model supports JSON responses.",
+        ) from exc

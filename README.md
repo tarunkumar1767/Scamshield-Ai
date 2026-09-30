@@ -11,7 +11,7 @@ Scam messages often rely on urgency, impersonation, unexpected payment requests,
 - Landing page, sign-up, sign-in, password reset, and account-scoped workspace (Supabase Auth when configured).
 - Local development demo access when Supabase is not configured.
 - Message analysis through FastAPI, with a deterministic `DEMO_MODE` analyzer or an optional OpenAI-compatible API.
-- Screenshot text extraction in the browser with Tesseract.js, followed by the same message analysis endpoint.
+- Screenshot text extraction in the browser with Tesseract.js, followed by `POST /api/analyze/image`; image bytes stay in the browser.
 - URL structure checks for protocol, hostname, port, path, query, and common heuristic indicators. The submitted destination is never visited.
 - Dashboard with locally calculated totals and recent scans.
 - History with details, deletion, and clear-all confirmation. It stores sanitized analysis metadata, not the original message or screenshot.
@@ -117,11 +117,11 @@ AI_API_BASE_URL=https://api.openai.com/v1
 AI_MODEL=your-supported-model
 ```
 
-The backend sends message text to the configured provider when this mode is enabled. It validates the returned JSON against the expected schema. Without a key/model, the endpoint returns a generic service error and does not reveal configuration details to the browser. Return to `DEMO_MODE=true` to work without a provider.
+The backend sends message text to the configured provider when this mode is enabled. It validates the returned JSON against the expected schema and rejects obvious Supabase URLs/keys used as `AI_API_KEY`. If configuration or the provider fails, the endpoint returns a safe structured error code and a user-facing explanation; it never returns credentials, provider response bodies, or stack traces. Return to `DEMO_MODE=true` to work without a provider.
 
 ## Deployment
 
-The frontend and backend are deployed separately. The frontend calls the backend using `VITE_API_URL`; set it to the Render service origin (for example, `https://your-service.onrender.com`, with no trailing slash). In local development, Vite proxies `/api` to `http://127.0.0.1:8000`.
+The frontend and backend are deployed separately. The frontend calls the backend using `VITE_API_URL`; set it to `https://scamshield-ai-ekb5.onrender.com` for the current deployment, with no trailing slash. In local development, Vite proxies `/api` to `http://127.0.0.1:8000`.
 
 ### Frontend — Vercel
 
@@ -134,6 +134,14 @@ The frontend and backend are deployed separately. The frontend calls the backend
   - `VITE_API_URL` — required; the deployed Render backend origin, without a trailing slash.
   - `VITE_SUPABASE_URL` — required for real Supabase authentication.
   - `VITE_SUPABASE_ANON_KEY` — required for real Supabase authentication. Use only the public anon/publishable key; never use a service-role key in the browser.
+
+For this deployment, set these values in Vercel (keep Supabase values private to the project's Vercel settings; never put a service-role key here):
+
+```dotenv
+VITE_API_URL=https://scamshield-ai-ekb5.onrender.com
+VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+VITE_SUPABASE_ANON_KEY=<public-anon-or-publishable-key>
+```
 
 Set the Supabase Auth Site URL to the deployed Vercel origin and add `<your-vercel-origin>/reset-password` to the allowed redirect URLs. Configure both the production domain and any intended Vercel preview domains explicitly as Supabase redirect URLs.
 
@@ -150,7 +158,19 @@ Set the Supabase Auth Site URL to the deployed Vercel origin and add `<your-verc
   - `AI_API_BASE_URL` — optional OpenAI-compatible API base URL; defaults to `https://api.openai.com/v1`.
   - `URL_REPUTATION_API_KEY` — reserved optional variable; the current URL checker is heuristic-only and does not use a reputation service.
 
-The health endpoint is `GET /api/health` (the legacy `GET /health` route remains available). It returns a small JSON status response. The API does not visit submitted URLs.
+For AI analysis on the current deployment, set `DEMO_MODE=false` and provide the provider's own API key and supported model in Render. Never use a Supabase URL, anon key, or service-role key as `AI_API_KEY`.
+
+```dotenv
+DEMO_MODE=false
+AI_API_KEY=<provider-key-set-only-in-Render>
+AI_API_BASE_URL=https://api.openai.com/v1
+AI_MODEL=<supported-Chat-Completions-model>
+FRONTEND_URL=https://scamshield-ai-j7gz.vercel.app,https://scamshield-ai-j7gz-ed4qkl7s-tarunkataria007s-projects.vercel.app
+```
+
+The health endpoint is `GET /api/health` (the legacy `GET /health` route remains available). It returns backend status, demo-mode status, and a boolean indicating whether the AI key and model are present; this does not verify that the provider is reachable. The API does not visit submitted URLs.
+
+After updating Render environment variables, use **Manual Deploy → Deploy latest commit** if automatic deploys are disabled. After updating Vercel variables, trigger a new deployment so Vite rebuilds the frontend with the new values.
 
 ### Supabase
 
@@ -163,8 +183,8 @@ Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in Vercel's project environ
 | `GET` | `/health` | Backend and demo-mode status |
 | `GET` | `/api/health` | Deployment health check |
 | `POST` | `/api/analyze/message` | Analyze `{ "message": "..." }` and return structured risk guidance |
+| `POST` | `/api/analyze/image` | Analyze `{ "extracted_text": "..." }` from browser-side Tesseract OCR; image bytes stay in the browser |
 | `POST` | `/api/analyze/url` | Analyze `{ "url": "https://example.com/path" }` locally without visiting it |
-| `POST` | `/api/scan` | Legacy deterministic demo scan endpoint |
 
 FastAPI's generated schema and interactive docs are at `/docs` while the backend is running.
 
@@ -191,7 +211,7 @@ FastAPI's generated schema and interactive docs are at `/docs` while the backend
 - Add automated API and UI tests for scanners, history, auth guards, and responsive layouts.
 - Add an optional, privacy-reviewed URL reputation integration behind a server-side setting.
 - Add retention controls and an explicit export/delete flow for local history.
-- Add production deployment configuration, HTTPS, monitoring, and a documented data-retention policy.
+- Add monitoring and a documented data-retention policy.
 - Capture actual product screenshots after configuring a demo account and add them to this README.
 
 ## Hackathon demo walkthrough

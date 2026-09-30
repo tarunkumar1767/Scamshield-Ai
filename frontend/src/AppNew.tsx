@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { createWorker } from 'tesseract.js'
 import AuthPage, { type AuthFormValues, type AuthMode, type AuthReply } from './components/AuthPage'
-import { friendlyAuthError, isSupabaseConfigured, supabase, toAppSessionUser, type AppUser } from './lib/supabase'
+import { friendlyAuthError, isSupabaseConfigured, supabase, supabaseConfigurationMessage, toAppSessionUser, type AppUser } from './lib/supabase'
 
 type ScanResult = {
   risk_level: string
@@ -43,7 +43,19 @@ type HistoryItem = {
   result: ScanResult
 }
 type Page = 'landing' | 'login' | 'signup' | 'forgot-password' | 'reset-password' | 'dashboard' | 'scanner' | 'screenshot' | 'url' | 'history' | 'safety'
-const API_URL = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '')
+function normalizeApiUrl(value: string | undefined): string {
+  if (!value?.trim()) return ''
+  try {
+    const parsed = new URL(value.trim())
+    if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) return ''
+    const path = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '')
+    return `${parsed.origin}${path}`
+  } catch {
+    return ''
+  }
+}
+
+const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL)
 const HISTORY_KEY = 'scamshield.scan-history'
 const SAFETY_CHECKLIST_KEY = 'scamshield.safety-checklist'
 const LOCAL_DEMO_ENABLED = import.meta.env.DEV && import.meta.env.VITE_DEMO_MODE !== 'false'
@@ -182,7 +194,12 @@ export default function AppNew() {
     }).catch(() => { if (active) setAuthReady(true) })
     return () => { active = false; subscription.unsubscribe() }
   }, [])
-  useEffect(() => { let live = true; fetch(`${API_URL}/api/health`).then(r => { if (live) setApiOnline(r.ok) }).catch(() => { if (live) setApiOnline(false) }); return () => { live = false } }, [])
+  useEffect(() => {
+    let live = true
+    if (import.meta.env.PROD && !API_URL) { setApiOnline(false); return () => { live = false } }
+    fetch(`${API_URL}/api/health`).then(r => { if (live) setApiOnline(r.ok) }).catch(() => { if (live) setApiOnline(false) })
+    return () => { live = false }
+  }, [])
   useEffect(() => {
     setHistory(storageKey ? readHistory(storageKey) : [])
     setHistoryOwner(storageKey)
@@ -276,7 +293,7 @@ export default function AppNew() {
   }
 
   if (!authReady && page !== 'landing') return <WorkspaceLoading />
-  if (authPages.has(page)) return <AuthPage key={page} mode={page as AuthMode} configured={isSupabaseConfigured} demoEnabled={LOCAL_DEMO_ENABLED} resetAllowed={inRecovery} onSubmit={submitAuth} onDemo={enterDemo} onNavigate={openAuth} notice={authNotice} />
+  if (authPages.has(page)) return <AuthPage key={page} mode={page as AuthMode} configured={isSupabaseConfigured} configurationMessage={supabaseConfigurationMessage} demoEnabled={LOCAL_DEMO_ENABLED} resetAllowed={inRecovery} onSubmit={submitAuth} onDemo={enterDemo} onNavigate={openAuth} notice={authNotice} />
 
   return <div className="min-h-screen text-slate-100">
     {page === 'landing' ? <Landing go={go} signedIn={Boolean(authUser)} user={authUser} onSignOut={() => void signOut()} /> : !authUser ? <WorkspaceLoading /> : <div className="min-h-screen lg:flex">
@@ -326,6 +343,10 @@ function Scanner({ kind, onSave, initialMessage = '', onPrefillConsumed }: { kin
   useEffect(() => { if (kind === 'message' && initialMessage) { setValue(initialMessage); setResult(null); setError(''); onPrefillConsumed?.() } }, [kind, initialMessage, onPrefillConsumed])
   async function runScan() {
     const content = value.trim(); if (!content || scanInProgress.current) return
+    if (import.meta.env.PROD && !API_URL) {
+      setError('The backend URL is missing or invalid. Set VITE_API_URL in Vercel to the Render service URL, then rebuild the frontend.')
+      return
+    }
     let submittedContent = content
     if (isUrl) {
       try {
@@ -340,22 +361,44 @@ function Scanner({ kind, onSave, initialMessage = '', onPrefillConsumed }: { kin
     if (lastSavedSubmission.current === submittedContent) return
     scanInProgress.current = true; setBusy(true); setError(''); setResult(null)
     try {
-      const useMessageAnalysis = kind === 'message' || kind === 'screenshot'
-      const endpoint = isUrl ? '/api/analyze/url' : useMessageAnalysis ? '/api/analyze/message' : '/api/scan'
-      const requestBody = isUrl ? { url: submittedContent } : useMessageAnalysis ? { message: submittedContent } : { text: submittedContent }
+      const endpoint = kind === 'url' ? '/api/analyze/url' : kind === 'screenshot' ? '/api/analyze/image' : '/api/analyze/message'
+      const requestBody = kind === 'url' ? { url: submittedContent } : kind === 'screenshot' ? { extracted_text: submittedContent } : { message: submittedContent }
       const response = await fetch(`${API_URL}${endpoint}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
       })
       if (!response.ok) {
-        if (response.status === 422) setError(isUrl ? 'Enter a valid HTTP or HTTPS address and try again.' : 'The submitted text could not be analyzed. Check its length and try again.')
-        else if (response.status >= 500) setError('The analysis service is temporarily unavailable. Try again in a moment.')
+        const payload = await response.json().catch(() => null) as { detail?: { code?: string } | string } | null
+        const code = typeof payload?.detail === 'object' && payload.detail ? payload.detail.code : undefined
+        if (import.meta.env.DEV) console.warn('[ScamShield] Analysis request failed', { status: response.status, code })
+        const providerMessages: Record<string, string> = {
+          ai_configuration_missing: 'AI_API_KEY or AI_MODEL is missing from the backend environment. Set both on Render, or enable DEMO_MODE.',
+          ai_configuration_invalid: 'AI_API_KEY must be an AI-provider credential, not a Supabase URL or key. Check the Render environment settings.',
+          ai_authentication_failed: 'The AI provider rejected its credentials. Check AI_API_KEY in Render environment settings.',
+          ai_model_or_endpoint_not_found: 'The AI model or endpoint was not found. Check AI_MODEL and AI_API_BASE_URL in Render.',
+          ai_rate_limited: 'The AI provider is rate limiting requests. Wait briefly and try again.',
+          ai_provider_timeout: 'The AI provider did not respond in time. Try again shortly.',
+          ai_provider_unavailable: 'The AI provider is temporarily unavailable. Try again shortly.',
+          ai_provider_unreachable: 'The backend could not reach the AI provider. Check AI_API_BASE_URL and try again.',
+          ai_provider_invalid_response: 'The AI provider returned an unsupported response. Check the model and JSON response settings.',
+          ai_provider_request_rejected: 'The AI provider rejected the request. Check AI_API_BASE_URL and model compatibility.',
+          ai_provider_error: 'AI analysis is temporarily unavailable. Check the backend configuration or try again shortly.',
+        }
+        if (response.status === 400) setError('The backend rejected this request. Check the submitted content and try again.')
+        else if (response.status === 401) setError('The analysis service did not authorize this request. Check the backend deployment configuration.')
+        else if (response.status === 422) setError(isUrl ? 'Enter a valid HTTP or HTTPS address and try again.' : 'The submitted text could not be analyzed. Check its length and try again.')
+        else if (response.status === 429) setError('Too many analysis requests were sent. Wait a moment and try again.')
+        else if (response.status === 500) setError('The backend encountered an unexpected error. Try again shortly.')
+        else if (response.status === 503) setError((code && providerMessages[code]) || 'AI analysis is temporarily unavailable. Check the AI configuration or try again shortly.')
         else setError('The analysis request could not be completed. Try again.')
         return
       }
       const data: ScanResult = await response.json(); setResult(data); lastSavedSubmission.current = submittedContent; onSave(kind, data)
     }
-    catch { setError('Could not connect to the analysis service. Check that the backend is running, then try again.') } finally { scanInProgress.current = false; setBusy(false) }
+    catch (error) {
+      if (import.meta.env.DEV) console.warn('[ScamShield] Analysis network request failed', { errorType: error instanceof Error ? error.name : 'UnknownError' })
+      setError('Could not connect to the analysis service. Check the backend URL and connection, then try again.')
+    } finally { scanInProgress.current = false; setBusy(false) }
   }
   async function readImage(file?: File) {
     if (!file) return

@@ -3,7 +3,49 @@ import { createClient, type Session, type User } from '@supabase/supabase-js'
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim()
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
 
-export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey)
+function isValidSupabaseUrl(value: string | undefined): value is string {
+  if (!value) return false
+  try {
+    const parsed = new URL(value)
+    const isLocalDevelopmentHost = import.meta.env.DEV && ['localhost', '127.0.0.1'].includes(parsed.hostname)
+    return (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLocalDevelopmentHost))
+      && Boolean(parsed.hostname)
+      && !parsed.username
+      && !parsed.password
+      && parsed.pathname === '/'
+      && !parsed.search
+      && !parsed.hash
+  } catch {
+    return false
+  }
+}
+
+function isPublicSupabaseKey(value: string | undefined): boolean {
+  if (!value || value.toLowerCase().startsWith('sb_secret_')) return false
+  if (value.toLowerCase().startsWith('sb_publishable_')) return true
+
+  const parts = value.split('.')
+  if (parts.length !== 3) return false
+  try {
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const claims = JSON.parse(atob(payload + '='.repeat((4 - payload.length % 4) % 4))) as { role?: unknown }
+    return claims.role === 'anon'
+  } catch {
+    return false
+  }
+}
+
+export const supabaseConfigurationMessage = !supabaseUrl
+  ? 'Add VITE_SUPABASE_URL to the frontend environment settings to enable real accounts.'
+  : !isValidSupabaseUrl(supabaseUrl)
+    ? 'VITE_SUPABASE_URL must be a valid Supabase project base URL, such as https://<project-ref>.supabase.co, without a path or query.'
+    : !supabaseAnonKey
+      ? 'Add VITE_SUPABASE_ANON_KEY to the frontend environment settings to enable real accounts.'
+      : !isPublicSupabaseKey(supabaseAnonKey)
+        ? 'VITE_SUPABASE_ANON_KEY must be the public anon or publishable key. Never use a service-role or secret key in the frontend.'
+        : ''
+
+export const isSupabaseConfigured = supabaseConfigurationMessage === ''
 
 export const supabase = isSupabaseConfigured
   ? createClient(supabaseUrl!, supabaseAnonKey!, {

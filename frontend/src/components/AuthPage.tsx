@@ -8,6 +8,7 @@ export type AuthReply = { error?: string; message?: string }
 type Props = {
   mode: AuthMode
   configured: boolean
+  configurationMessage: string
   demoEnabled: boolean
   resetAllowed: boolean
   notice?: string
@@ -23,7 +24,7 @@ const copy: Record<AuthMode, { title: string; description: string; submit: strin
   'reset-password': { title: 'Choose a new password', description: 'Use a strong password you have not used elsewhere.', submit: 'Update password' },
 }
 
-export default function AuthPage({ mode, configured, demoEnabled, resetAllowed, onSubmit, onDemo, onNavigate, notice }: Props) {
+export default function AuthPage({ mode, configured, configurationMessage, demoEnabled, resetAllowed, onSubmit, onDemo, onNavigate, notice }: Props) {
   const [email, setEmail] = useState('')
   const [fullName, setFullName] = useState('')
   const [password, setPassword] = useState('')
@@ -66,7 +67,7 @@ export default function AuthPage({ mode, configured, demoEnabled, resetAllowed, 
       return
     }
     if (!configured && mode !== 'reset-password') {
-      setError('Supabase is not configured. Use the clearly labeled local demo or add your Supabase environment values.')
+      setError(configurationMessage || 'Supabase authentication is unavailable. Check the frontend environment settings.')
       return
     }
 
@@ -121,8 +122,8 @@ export default function AuthPage({ mode, configured, demoEnabled, resetAllowed, 
         </div>
 
         {!configured && <div role="status" className="mb-5 rounded-xl border border-amber-200/15 bg-amber-200/[0.045] p-3.5">
-          <p className="flex items-center gap-2 text-[10px] font-semibold text-amber-100"><Sparkles size={13}/>Supabase is not configured</p>
-          <p className="mt-1.5 text-[10px] leading-5 text-slate-400">Add <code className="text-slate-200">VITE_SUPABASE_URL</code> and <code className="text-slate-200">VITE_SUPABASE_ANON_KEY</code> to <code className="text-slate-200">frontend/.env</code> to enable real accounts.</p>
+          <p className="flex items-center gap-2 text-[10px] font-semibold text-amber-100"><Sparkles size={13}/>Supabase authentication is unavailable</p>
+          <p className="mt-1.5 text-[10px] leading-5 text-slate-400">{configurationMessage || 'Check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in the frontend environment settings.'}</p>
           {demoEnabled && <p className="mt-1.5 text-[10px] leading-5 text-amber-100/80">Local demo access is only for development: it creates no account, is not real authentication, and ends when this page reloads.</p>}
         </div>}
 

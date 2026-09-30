@@ -1,12 +1,14 @@
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from .analyzer import MessageAnalysis, analyze_demo, analyze_with_ai
+from .analyzer import AnalysisProviderError, MessageAnalysis, analyze_demo, analyze_with_ai
 from .config import get_cors_origins, settings
 from .url_analyzer import URLAnalysis, analyze_url
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title="ScamShield AI API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -17,12 +19,12 @@ app.add_middleware(
 )
 
 
-class ScanRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=20_000)
-
-
 class MessageAnalysisRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
+
+
+class ScreenshotAnalysisRequest(BaseModel):
+    extracted_text: str = Field(min_length=1, max_length=20_000)
 
 
 class URLAnalysisRequest(BaseModel):
@@ -32,37 +34,42 @@ class URLAnalysisRequest(BaseModel):
 @app.get("/health", include_in_schema=False)
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "demo_mode": settings.demo_mode}
-
-
-@app.post("/api/scan")
-def scan(request: ScanRequest):
-    # This deterministic response keeps the starter usable without an AI key.
-    indicators = [term for term in ("urgent", "password", "verify", "bank", "prize", "click", "payment", "otp") if term in request.text.lower()]
-    suspicious = len(indicators) >= 2
     return {
-        "risk_level": "high" if suspicious else "low",
-        "score": min(95, 20 + len(indicators) * 18),
-        "summary": "Potential scam indicators found. Verify the sender independently before acting." if suspicious else "No strong scam indicators detected in this starter assessment. Stay cautious with unexpected requests.",
-        "indicators": indicators,
+        "status": "ok",
         "demo_mode": settings.demo_mode,
+        "ai_configuration_ready": bool(settings.ai_api_key.strip() and settings.ai_model.strip()),
     }
 
 
-@app.post("/api/analyze/message", response_model=MessageAnalysis)
-def analyze_message(request: MessageAnalysisRequest):
-    message = request.message.strip()
+def _analyze_message_text(message: str) -> MessageAnalysis:
+    message = message.strip()
     if not message:
         raise HTTPException(status_code=422, detail="Message cannot be blank")
     try:
         analysis = analyze_demo(message) if settings.demo_mode else analyze_with_ai(message)
-    except RuntimeError as exc:
-        # Keep configuration/provider internals out of API responses.
+    except AnalysisProviderError as exc:
         raise HTTPException(
             status_code=503,
-            detail="Message analysis is temporarily unavailable. Check the server configuration and try again.",
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    except Exception as exc:
+        logger.error("Unexpected analysis provider failure (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "ai_provider_error", "message": "AI analysis is temporarily unavailable. Check the backend configuration or try again shortly."},
         ) from exc
     return analysis
+
+
+@app.post("/api/analyze/message", response_model=MessageAnalysis)
+def analyze_message(request: MessageAnalysisRequest):
+    return _analyze_message_text(request.message)
+
+
+@app.post("/api/analyze/image", response_model=MessageAnalysis)
+def analyze_screenshot(request: ScreenshotAnalysisRequest):
+    """Analyze OCR text extracted locally by the frontend; image bytes stay in the browser."""
+    return _analyze_message_text(request.extracted_text)
 
 
 @app.post("/api/analyze/url", response_model=URLAnalysis)
