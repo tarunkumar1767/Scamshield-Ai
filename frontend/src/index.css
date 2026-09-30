@@ -1,0 +1,10 @@
+@import "tailwindcss";
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #e8edf8; background: #090f1e; font-synthesis: none; text-rendering: optimizeLegibility; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(ellipse at 50% -10%, #162c4a 0%, #0a1121 46%, #090f1e 75%); }
+button, textarea { font: inherit; }
+:where(a, button, input, textarea, select, [role="button"]):focus-visible {
+  outline: 2px solid #67e8f9;
+  outline-offset: 3px;
+}
+:where(button, input, textarea, select):disabled { cursor: not-allowed; }

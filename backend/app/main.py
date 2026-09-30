@@ -1,0 +1,72 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException
+from pydantic import BaseModel, Field
+
+from .analyzer import MessageAnalysis, analyze_demo, analyze_with_ai
+from .config import settings
+from .url_analyzer import URLAnalysis, analyze_url
+
+app = FastAPI(title="ScamShield AI API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class ScanRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class MessageAnalysisRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=20_000)
+
+
+class URLAnalysisRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=8_192)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "demo_mode": settings.demo_mode}
+
+
+@app.post("/api/scan")
+def scan(request: ScanRequest):
+    # This deterministic response keeps the starter usable without an AI key.
+    indicators = [term for term in ("urgent", "password", "verify", "bank", "prize", "click", "payment", "otp") if term in request.text.lower()]
+    suspicious = len(indicators) >= 2
+    return {
+        "risk_level": "high" if suspicious else "low",
+        "score": min(95, 20 + len(indicators) * 18),
+        "summary": "Potential scam indicators found. Verify the sender independently before acting." if suspicious else "No strong scam indicators detected in this starter assessment. Stay cautious with unexpected requests.",
+        "indicators": indicators,
+        "demo_mode": settings.demo_mode,
+    }
+
+
+@app.post("/api/analyze/message", response_model=MessageAnalysis)
+def analyze_message(request: MessageAnalysisRequest):
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="Message cannot be blank")
+    try:
+        analysis = analyze_demo(message) if settings.demo_mode else analyze_with_ai(message)
+    except RuntimeError as exc:
+        # Keep configuration/provider internals out of API responses.
+        raise HTTPException(
+            status_code=503,
+            detail="Message analysis is temporarily unavailable. Check the server configuration and try again.",
+        ) from exc
+    return analysis
+
+
+@app.post("/api/analyze/url", response_model=URLAnalysis)
+def analyze_submitted_url(request: URLAnalysisRequest):
+    try:
+        return analyze_url(request.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
