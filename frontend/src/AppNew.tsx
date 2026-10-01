@@ -21,7 +21,7 @@ type ScanResult = {
   safety_tips?: string[]
   demo_mode?: boolean
   analysis_source?: 'ai' | 'demo' | 'fallback'
-  fallback_reason?: 'AI_RATE_LIMITED' | 'AI_QUOTA_EXCEEDED' | 'AI_TIMEOUT' | 'AI_NETWORK_ERROR' | null
+  fallback_reason?: 'AI_CONFIGURATION_MISSING' | 'AI_AUTH_FAILED' | 'AI_MODEL_ERROR' | 'AI_RATE_LIMITED' | 'AI_QUOTA_EXCEEDED' | 'AI_TIMEOUT' | 'AI_NETWORK_ERROR' | 'AI_PROVIDER_ERROR' | null
   indicators?: string[]
   assessment_type?: string
   url?: string
@@ -102,7 +102,7 @@ function safeResult(result: ScanResult): ScanResult {
     safety_tips: result.safety_tips?.slice(0, 20).map(item => redactSensitiveText(item, 300)).filter(Boolean),
     demo_mode: result.analysis_source === 'fallback' ? undefined : result.demo_mode,
     analysis_source: result.analysis_source,
-    fallback_reason: ['AI_RATE_LIMITED', 'AI_QUOTA_EXCEEDED', 'AI_TIMEOUT', 'AI_NETWORK_ERROR'].includes(result.fallback_reason || '') ? result.fallback_reason : undefined,
+    fallback_reason: ['AI_CONFIGURATION_MISSING', 'AI_AUTH_FAILED', 'AI_MODEL_ERROR', 'AI_RATE_LIMITED', 'AI_QUOTA_EXCEEDED', 'AI_TIMEOUT', 'AI_NETWORK_ERROR', 'AI_PROVIDER_ERROR'].includes(result.fallback_reason || '') ? result.fallback_reason : undefined,
     indicators: result.indicators?.slice(0, 20).map(item => redactSensitiveText(item, 180)).filter(Boolean),
     assessment_type: result.assessment_type,
     protocol: redactSensitiveText(result.protocol, 20) || undefined,
@@ -154,7 +154,7 @@ function readHistory(key: string): HistoryItem[] {
   } catch { return [] }
 }
 function persistHistory(items: HistoryItem[], key: string | null) { if (!key) return; try { localStorage.setItem(key, JSON.stringify(items)) } catch { /* The current session remains usable if browser storage is unavailable. */ } }
-function riskTone(risk: string) { return risk === 'high' || risk === 'critical' ? 'rose' : risk === 'medium' ? 'amber' : 'emerald' }
+function riskTone(risk: string) { const normalized = risk.trim().toLowerCase().replace(/[_-]+/g, ' '); return normalized.includes('critical') || normalized.includes('high') ? 'rose' : normalized.includes('medium') || normalized === 'low risk' ? 'amber' : 'emerald' }
 function kindLabel(kind: ScanKind) { return kind === 'url' ? 'URL' : kind === 'screenshot' ? 'Screenshot' : 'Message' }
 function formatDate(value: string) { const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Date unavailable' }
 
@@ -291,9 +291,9 @@ export default function AppNew() {
   const visibleHistory = historyOwner === storageKey && storageKey ? history : []
   const inRecovery = page === 'reset-password' && recoveryActive
   const riskCounts = {
-    high: visibleHistory.filter(item => item.riskLevel === 'high' || item.riskLevel === 'critical').length,
-    medium: visibleHistory.filter(item => item.riskLevel === 'medium').length,
-    low: visibleHistory.filter(item => item.riskLevel === 'low' || item.riskLevel === 'safe').length,
+    high: visibleHistory.filter(item => /high|critical/i.test(item.riskLevel)).length,
+    medium: visibleHistory.filter(item => /medium/i.test(item.riskLevel)).length,
+    low: visibleHistory.filter(item => /low|safe/i.test(item.riskLevel)).length,
   }
 
   if (!authReady && page !== 'landing') return <WorkspaceLoading />
@@ -483,20 +483,60 @@ function Scanner({ kind, onSave, initialMessage = '', onPrefillConsumed }: { kin
 }
 function URLResultDetails({ result }: { result: ScanResult }) { const severityClass: Record<string, string> = { high: 'border-rose-200/15 bg-rose-200/[0.04] text-rose-100', medium: 'border-amber-200/15 bg-amber-200/[0.04] text-amber-100', low: 'border-cyan-200/10 bg-cyan-200/[0.025] text-slate-300' }; return <div className="mt-5 space-y-3"><section className="rounded-xl border border-white/[0.08] bg-[#0b1321] p-4"><h3 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Parsed URL structure</h3><div className="mt-3 grid gap-3 sm:grid-cols-2"><div><p className="text-[9px] text-slate-600">Protocol</p><p className="mt-1 break-all text-[10px] text-slate-200">{result.protocol || '—'}</p></div><div><p className="text-[9px] text-slate-600">Domain</p><p className="mt-1 break-all text-[10px] text-slate-200">{result.domain || '—'}</p></div><div><p className="text-[9px] text-slate-600">Port</p><p className="mt-1 text-[10px] text-slate-200">{result.port ?? 'Not specified'}</p></div><div><p className="text-[9px] text-slate-600">Path</p><p className="mt-1 break-all text-[10px] text-slate-200">{result.path || '/'}</p></div></div>{result.query_parameters && <div className="mt-3 border-t border-white/[0.06] pt-3"><p className="text-[9px] text-slate-600">Query parameters</p>{result.query_parameters.length ? <div className="mt-1.5 space-y-1.5">{result.query_parameters.map((param,index) => <p key={`${param.key}-${index}`} className="break-all text-[10px] text-slate-300"><span className="text-cyan-100">{param.key}</span><span className="text-slate-600"> = </span>{param.value || <span className="italic text-slate-600">(empty)</span>}</p>)}</div> : <p className="mt-1.5 text-[10px] text-slate-500">None</p>}</div>}</section><section className="rounded-xl border border-white/[0.08] bg-[#0b1321] p-4"><div className="flex items-center justify-between gap-3"><h3 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Structural findings</h3><span className="rounded-full bg-white/[0.04] px-2 py-1 text-[9px] text-slate-500">Heuristic only</span></div><p className="mt-2 text-[10px] leading-5 text-slate-400">{result.explanation || 'The analysis checks URL structure only. It does not confirm maliciousness.'}</p>{result.findings?.length ? <div className="mt-3 space-y-2">{result.findings.map(finding => <div key={finding.code} className={`rounded-lg border p-3 ${severityClass[finding.severity] || severityClass.low}`}><div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-[10px] font-semibold">{finding.title}</h4><span className="rounded-full bg-black/15 px-2 py-0.5 text-[8px] uppercase tracking-wide">{finding.severity} signal</span></div><p className="mt-1.5 text-[10px] leading-5 opacity-80">{finding.explanation}</p><p className="mt-1 break-all font-mono text-[9px] opacity-60">Evidence: {finding.evidence}</p></div>)}</div> : <p className="mt-3 rounded-lg border border-emerald-200/10 bg-emerald-200/[0.025] p-3 text-[10px] text-emerald-100">No listed structural indicators were found. This does not prove the URL is safe.</p>}<p className="mt-3 border-t border-white/[0.06] pt-3 text-[9px] leading-4 text-amber-100/60">This is heuristic analysis, not a reputation lookup or confirmed maliciousness verdict. The submitted URL was not visited.</p></section></div> }
 
-function ResultCard({ result }: { result: ScanResult }) { const tone = riskTone(result.risk_level); const flags = result.red_flags || result.indicators || []; const score = result.risk_score ?? result.score ?? 0; return <div className={`mt-5 rounded-xl border p-4 ${tone === 'rose' ? 'border-rose-200/15 bg-rose-200/[0.045]' : tone === 'amber' ? 'border-amber-200/15 bg-amber-200/[0.045]' : 'border-emerald-200/15 bg-emerald-200/[0.045]'}`}><div className="flex flex-wrap items-center gap-2"><span className={tone === 'rose' ? 'text-rose-200' : tone === 'amber' ? 'text-amber-200' : 'text-emerald-200'}>{tone === 'rose' ? <AlertTriangle size={16}/> : <CheckCircle2 size={16}/>}</span><h3 className="text-xs font-semibold">{result.risk_level === 'high' ? 'Potential warning signs found' : result.risk_level === 'medium' ? 'Some warning signs found' : 'No strong warning signs found'}</h3><span className="ml-auto rounded-full bg-black/20 px-2 py-1 text-[9px] text-slate-300">Risk score {score}/100</span></div>{result.category && <p className="mt-2 text-[10px] font-medium text-cyan-100">{result.category}</p>}<p className="mt-2 text-[11px] leading-5 text-slate-300">{result.summary || result.explanation}</p>{flags.length > 0 && <div className="mt-3"><p className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-slate-500">Red flags</p><div className="flex flex-wrap gap-1.5">{flags.map(item => <span key={item} className="rounded-md border border-white/[0.08] bg-black/15 px-2 py-1 text-[9px] text-slate-400">{item}</span>)}</div></div>}{result.evidence && result.evidence.length > 0 && <div className="mt-3 space-y-1.5">{result.evidence.map((item, index) => <blockquote key={`${item.quote}-${index}`} className="rounded-lg border-l-2 border-amber-200/30 bg-black/10 px-3 py-2 text-[10px] leading-5 text-slate-400"><span className="text-slate-200">“{item.quote}”</span> — {item.reason}</blockquote>)}</div>}{result.recommended_actions && <div className="mt-3"><p className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-slate-500">Recommended next steps</p><ul className="space-y-1">{result.recommended_actions.map((item,index) => <li key={index} className="flex gap-2 text-[10px] leading-5 text-slate-400"><Check size={12} className="mt-1 shrink-0 text-cyan-200"/>{item}</li>)}</ul></div>}{result.safety_tips && result.safety_tips.length > 0 && <div className="mt-3 rounded-lg border border-cyan-200/[0.08] bg-cyan-200/[0.025] p-3"><p className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-cyan-100/70">Safety tips</p>{result.safety_tips.map((item,index) => <p key={index} className="text-[10px] leading-5 text-slate-400">{item}</p>)}</div>}<p className="mt-3 text-[9px] text-slate-600">{result.assessment_type === 'heuristic' ? 'Heuristic review · not a confirmed maliciousness verdict' : result.demo_mode === true ? 'Demo assessment · not an AI verdict' : result.demo_mode === false ? 'AI assessment' : 'Assessment'} · Verify with the organization through a trusted channel.</p></div> }
+function ResultCard({ result }: { result: ScanResult }) {
+  const tone = riskTone(result.risk_level)
+  const normalizedRisk = result.risk_level.trim().toLowerCase()
+  const flags = result.red_flags || result.indicators || []
+  const score = result.risk_score ?? result.score ?? 0
+  const headline = normalizedRisk.includes('critical') || normalizedRisk.includes('high')
+    ? 'Potential warning signs found'
+    : normalizedRisk.includes('medium') || normalizedRisk === 'low risk'
+      ? 'Review before acting'
+      : 'No strong warning signs found'
+  const assessmentLabel = result.analysis_source === 'fallback'
+    ? 'Fallback Risk Assessment'
+    : result.assessment_type === 'heuristic'
+      ? 'Heuristic Risk Assessment'
+      : result.demo_mode === true
+        ? 'Demo Risk Assessment'
+        : 'AI Risk Assessment'
+
+  return (
+    <div className={`mt-5 rounded-xl border p-4 ${tone === 'rose' ? 'border-rose-200/15 bg-rose-200/[0.045]' : tone === 'amber' ? 'border-amber-200/15 bg-amber-200/[0.045]' : 'border-emerald-200/15 bg-emerald-200/[0.045]'}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={tone === 'rose' ? 'text-rose-200' : tone === 'amber' ? 'text-amber-200' : 'text-emerald-200'}>
+          {tone === 'rose' ? <AlertTriangle size={16}/> : <CheckCircle2 size={16}/>}
+        </span>
+        <h3 className="text-xs font-semibold">{headline}</h3>
+        <span className="ml-auto rounded-full bg-black/20 px-2 py-1 text-[9px] text-slate-300">{assessmentLabel} · {score}/100</span>
+      </div>
+      {result.category && <p className="mt-2 text-[10px] font-medium text-cyan-100">{result.category}</p>}
+      <p className="mt-2 text-[11px] leading-5 text-slate-300">{result.summary || result.explanation}</p>
+      {flags.length > 0 && <div className="mt-3"><p className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-slate-500">Red flags</p><div className="flex flex-wrap gap-1.5">{flags.map(item => <span key={item} className="rounded-md border border-white/[0.08] bg-black/15 px-2 py-1 text-[9px] text-slate-400">{item}</span>)}</div></div>}
+      {result.evidence && result.evidence.length > 0 && <div className="mt-3 space-y-1.5">{result.evidence.map((item, index) => <blockquote key={`${item.quote}-${index}`} className="rounded-lg border-l-2 border-amber-200/30 bg-black/10 px-3 py-2 text-[10px] leading-5 text-slate-400"><span className="text-slate-200">“{item.quote}”</span> — {item.reason}</blockquote>)}</div>}
+      {result.recommended_actions && <div className="mt-3"><p className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-slate-500">Recommended next steps</p><ul className="space-y-1">{result.recommended_actions.map((item,index) => <li key={index} className="flex gap-2 text-[10px] leading-5 text-slate-400"><Check size={12} className="mt-1 shrink-0 text-cyan-200"/>{item}</li>)}</ul></div>}
+      {result.safety_tips && result.safety_tips.length > 0 && <div className="mt-3 rounded-lg border border-cyan-200/[0.08] bg-cyan-200/[0.025] p-3"><p className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-cyan-100/70">Safety tips</p>{result.safety_tips.map((item,index) => <p key={index} className="text-[10px] leading-5 text-slate-400">{item}</p>)}</div>}
+      <p className="mt-3 text-[9px] text-slate-600">{result.analysis_source === 'fallback' ? 'Deterministic fallback · not AI-generated' : result.assessment_type === 'heuristic' ? 'Heuristic review · not a confirmed maliciousness verdict' : result.demo_mode === true ? 'Demo assessment · not an AI verdict' : 'Automated assessment'} · A score is not a probability or guarantee. Verify through a trusted channel.</p>
+    </div>
+  )
+}
 
 function FallbackNotice({ result }: { result: ScanResult }) {
   if (result.analysis_source !== 'fallback') return null
-  const detail = result.fallback_reason === 'AI_QUOTA_EXCEEDED'
-    ? 'The provider account has reached its usage limit. This deterministic assessment is not LLM-generated.'
-    : result.fallback_reason === 'AI_RATE_LIMITED'
-      ? 'The provider is temporarily rate limiting requests. This deterministic assessment is not LLM-generated.'
-      : result.fallback_reason === 'AI_TIMEOUT'
-        ? 'The provider did not respond in time. This deterministic assessment is not LLM-generated.'
-        : 'The backend could not reach the provider. This deterministic assessment is not LLM-generated.'
+  const details: Record<string, string> = {
+    AI_CONFIGURATION_MISSING: 'The provider configuration is incomplete.',
+    AI_AUTH_FAILED: 'The provider rejected its credentials.',
+    AI_MODEL_ERROR: 'The configured model or provider endpoint was unavailable.',
+    AI_RATE_LIMITED: 'The provider is temporarily rate limiting requests.',
+    AI_QUOTA_EXCEEDED: 'The provider account has reached its usage limit.',
+    AI_TIMEOUT: 'The provider did not respond in time.',
+    AI_NETWORK_ERROR: 'The backend could not reach the provider.',
+    AI_PROVIDER_ERROR: 'The provider returned an unsupported response or could not complete the request.',
+  }
+  const detail = result.fallback_reason ? details[result.fallback_reason] || details.AI_PROVIDER_ERROR : details.AI_PROVIDER_ERROR
   return <div role="status" className="mt-5 rounded-xl border border-amber-200/15 bg-amber-200/[0.045] p-3 text-[11px] leading-5 text-amber-100">
-    <p className="font-semibold">AI provider temporarily unavailable — showing fallback safety analysis.</p>
-    <p className="mt-1 text-amber-100/70">{detail}</p>
+    <p className="font-semibold">AI analysis unavailable — showing deterministic fallback assessment.</p>
+    <p className="mt-1 text-amber-100/70">{detail} This result is not AI-generated.</p>
   </div>
 }
 

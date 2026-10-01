@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .analyzer import AnalysisProviderError, MessageAnalysis, analyze_demo, analyze_with_ai
+from .analyzer import AnalysisProviderError, MessageAnalysis, analyze_demo, analyze_fallback, analyze_with_ai
 from .config import get_cors_origins, settings
 from .url_analyzer import URLAnalysis, analyze_url
 
@@ -48,16 +48,10 @@ def _analyze_message_text(message: str) -> MessageAnalysis:
     try:
         analysis = analyze_demo(message) if settings.demo_mode else analyze_with_ai(message)
     except AnalysisProviderError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": exc.code, "message": exc.message},
-        ) from exc
-    except Exception as exc:
-        logger.error("Unexpected analysis provider failure (%s)", type(exc).__name__)
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "AI_PROVIDER_ERROR", "message": "AI analysis is temporarily unavailable. Check the backend configuration or try again shortly."},
-        ) from exc
+        return analyze_fallback(message, exc.code)
+    except Exception:
+        logger.error("Unexpected message analysis failure category=AI_PROVIDER_ERROR")
+        return analyze_fallback(message, "AI_PROVIDER_ERROR")
     return analysis
 
 

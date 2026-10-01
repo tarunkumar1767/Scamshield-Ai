@@ -10,7 +10,7 @@ Scam messages often rely on urgency, impersonation, unexpected payment requests,
 
 - Landing page, sign-up, sign-in, password reset, and account-scoped workspace (Supabase Auth when configured).
 - Local development demo access when Supabase is not configured.
-- Message analysis through FastAPI, with a deterministic `DEMO_MODE` analyzer or an optional OpenAI-compatible API.
+- Message analysis through FastAPI, with deterministic `DEMO_MODE`/fallback analysis, the official Google Gemini SDK, or an OpenAI-compatible provider.
 - Screenshot text extraction in the browser with Tesseract.js, followed by `POST /api/analyze/image`; image bytes stay in the browser.
 - URL structure checks for protocol, hostname, port, path, query, and common heuristic indicators. The submitted destination is never visited.
 - Dashboard with locally calculated totals and recent scans.
@@ -22,7 +22,7 @@ Scam messages often rely on urgency, impersonation, unexpected payment requests,
 - Frontend: React, TypeScript, Vite, Tailwind CSS, Lucide icons, Tesseract.js, Supabase JS.
 - Backend: Python, FastAPI, Pydantic Settings, Uvicorn.
 - Storage: browser `localStorage` for scan history and Safety Center checklist state.
-- Optional AI service: OpenAI-compatible Chat Completions API, configured only on the backend.
+- Optional AI service: Google Gen AI SDK for Gemini, with an OpenAI-compatible Chat Completions option for other providers; credentials stay on the backend.
 
 ## Project structure
 
@@ -113,11 +113,14 @@ Keep AI provider credentials in `backend/.env`, never in Vite variables or sourc
 ```dotenv
 DEMO_MODE=false
 AI_API_KEY=your-provider-key
-AI_API_BASE_URL=https://api.openai.com/v1
-AI_MODEL=your-supported-model
+AI_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+AI_MODEL=gemini-3.8-flash
+AI_REQUEST_TIMEOUT_SECONDS=60
 ```
 
-The backend sends message text to the configured provider when this mode is enabled. It validates the returned JSON against the expected schema and rejects obvious Supabase URLs/keys used as `AI_API_KEY`. Temporary HTTP 429 rate limits are retried at most twice with exponential backoff; quota errors are not retried. Rate limits, quota exhaustion, timeouts, and network failures return deterministic heuristic analysis labeled `analysis_source: "fallback"` while keeping `demo_mode: false`. The UI identifies this result as a fallback, not as LLM-generated. Authentication, model, malformed-response, and other provider errors return safe structured error codes. Provider bodies, credentials, and stack traces are never returned to the browser. Health checks report configuration presence only and do not make live provider requests.
+For a Google hostname, the backend uses the official Google Gen AI SDK and Gemini Interactions API; `AI_API_BASE_URL` selects the Google provider while the SDK manages its API transport. The request uses structured JSON output, low thinking for Gemini 3 models, a configured timeout, and `store=false`. Set `AI_API_KEY` and `AI_MODEL` only in the backend environment. `AI_REQUEST_TIMEOUT_SECONDS` defaults to 60 and accepts values from 1 to 300 seconds. Other configured provider hosts continue through the OpenAI-compatible Chat Completions path.
+
+Every valid AI response is checked against the ScamShield schema and score bands. Provider requests are attempted at most three times for transient HTTP, timeout, and network failures with bounded exponential backoff and jitter; permanent configuration/authentication failures are not retried. Any provider failure, invalid JSON, or schema mismatch returns deterministic analysis labeled `analysis_source: "fallback"` and `demo_mode: false`. The UI identifies fallback output as deterministic and not AI-generated. Provider bodies, credentials, stack traces, and submitted content are never logged or returned as provider errors. Health checks report configuration presence only and do not call the provider.
 
 ## Deployment
 
@@ -155,7 +158,8 @@ Set the Supabase Auth Site URL to the deployed Vercel origin and add `<your-verc
   - `FRONTEND_URL` — optional additional exact frontend origins; separate multiple origins with commas and omit paths. The two ScamShield Vercel origins and the local Vite origins are allowed by default. Do not use `*`.
   - `AI_API_KEY` — optional backend-only provider credential; required only when `DEMO_MODE=false`.
   - `AI_MODEL` — provider model name; required only when `DEMO_MODE=false`.
-  - `AI_API_BASE_URL` — optional OpenAI-compatible API base URL; defaults to `https://api.openai.com/v1`.
+  - `AI_API_BASE_URL` — provider base URL; a Google hostname selects the official Gemini SDK, otherwise the OpenAI-compatible path is used. Defaults to `https://api.openai.com/v1`.
+  - `AI_REQUEST_TIMEOUT_SECONDS` — provider request timeout in seconds; defaults to `60`, allowed range `1`–`300`.
   - `URL_REPUTATION_API_KEY` — reserved optional variable; the current URL checker is heuristic-only and does not use a reputation service.
 
 For AI analysis on the current deployment, set `DEMO_MODE=false` and provide the provider's own API key and supported model in Render. Never use a Supabase URL, anon key, or service-role key as `AI_API_KEY`.
@@ -163,8 +167,9 @@ For AI analysis on the current deployment, set `DEMO_MODE=false` and provide the
 ```dotenv
 DEMO_MODE=false
 AI_API_KEY=<provider-key-set-only-in-Render>
-AI_API_BASE_URL=https://api.openai.com/v1
-AI_MODEL=<supported-Chat-Completions-model>
+AI_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+AI_MODEL=gemini-3.8-flash
+AI_REQUEST_TIMEOUT_SECONDS=60
 FRONTEND_URL=https://scamshield-ai-j7gz.vercel.app,https://scamshield-ai-j7gz-ed4qkl7s-tarunkataria007s-projects.vercel.app
 ```
 
@@ -204,7 +209,7 @@ FastAPI's generated schema and interactive docs are at `/docs` while the backend
 - A clean result is not proof that a sender or site is trustworthy; a warning is not proof of maliciousness.
 - Real authentication and AI provider behavior cannot be exercised until the relevant project credentials and settings are supplied.
 - OCR accuracy depends on image quality, language, font size, and browser network availability for initial language data.
-- There are no automated frontend/backend test suites configured yet; the app can be type-checked and production-built with `npm run build`, and the API can be explored at `/docs`.
+- Backend automated provider, fallback, route, risk-score, and CORS tests run with `python -m unittest discover -s tests` from `backend`; the frontend can be type-checked and production-built with `npm run build` from `frontend`.
 
 ## Suggested next improvements
 
