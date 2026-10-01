@@ -16,6 +16,39 @@ from .config import settings
 logger = logging.getLogger(__name__)
 FALLBACK_CODES = {"AI_RATE_LIMITED", "AI_QUOTA_EXCEEDED", "AI_TIMEOUT", "AI_NETWORK_ERROR"}
 MAX_RATE_LIMIT_RETRIES = 2
+GEMINI_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+        "risk_score": {"type": "integer"},
+        "category": {"type": "string"},
+        "summary": {"type": "string"},
+        "red_flags": {"type": "array", "items": {"type": "string"}},
+        "evidence": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"quote": {"type": "string"}, "reason": {"type": "string"}},
+                "required": ["quote", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "recommended_actions": {"type": "array", "items": {"type": "string"}},
+        "safety_tips": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "risk_level", "risk_score", "category", "summary", "red_flags", "evidence",
+        "recommended_actions", "safety_tips",
+    ],
+    "additionalProperties": False,
+}
+SAFE_PROVIDER_ERROR_TYPES = {
+    "invalid_argument", "invalid_request_error", "invalid_parameter", "unsupported_parameter",
+    "model_not_found", "invalid_model", "permission_denied", "unauthorized",
+    "authentication_error", "rate_limit_error", "insufficient_quota", "resource_exhausted",
+    "quota_exceeded", "internal_error", "server_error", "http_error", "url_error",
+    "timeout_error", "os_error", "invalid_response_format",
+}
 
 
 class AnalysisProviderError(RuntimeError):
@@ -162,36 +195,46 @@ def _provider_endpoint(base_url: str) -> tuple[str, str]:
         raise AnalysisProviderError("AI_PROVIDER_ERROR", "AI_API_BASE_URL must be a valid HTTP or HTTPS provider URL.") from exc
 
 
-def _provider_error_fields(error: HTTPError) -> tuple[str, str]:
+def _provider_error_fields(error: HTTPError) -> tuple[str, str, str]:
     """Read only enough of an error payload to classify it; never return/log its text."""
     try:
         payload = json.loads(error.read(8192).decode("utf-8", errors="replace"))
     except (OSError, ValueError, UnicodeDecodeError):
-        return "", ""
+        return "", "", "http_error"
     detail = payload.get("error", payload) if isinstance(payload, dict) else {}
     if not isinstance(detail, dict):
-        return "", ""
+        return "", "", "http_error"
     code = str(detail.get("code", "")).lower()[:100]
     error_type = str(detail.get("type", "")).lower()[:100]
     message = str(detail.get("message", "")).lower()[:1000]
-    return f"{code} {error_type}", message
+    diagnostic_type = next(
+        (value for value in (error_type, code) if value in SAFE_PROVIDER_ERROR_TYPES),
+        "http_error",
+    )
+    return f"{code} {error_type}", message, diagnostic_type
 
 
-def _is_quota_error(error: HTTPError) -> bool:
-    identifiers, message = _provider_error_fields(error)
+def _is_quota_error(identifiers: str, message: str) -> bool:
     quota_markers = ("insufficient_quota", "billing_hard_limit", "quota_exceeded", "billing_limit")
     return any(marker in identifiers or marker in message for marker in quota_markers) or any(
         phrase in message for phrase in ("billing limit", "usage limit", "quota has been", "quota is exceeded", "quota exceeded", "exceeded your current quota", "insufficient quota")
     )
 
 
-def _log_provider_failure(status: int | None, category: str, model: str, hostname: str) -> None:
+def _log_provider_failure(
+    status: int | None,
+    category: str,
+    model: str,
+    hostname: str,
+    error_type: str = "provider_error",
+) -> None:
     logger.warning(
-        "AI provider request failed status=%s category=%s model=%s base_url_host=%s",
+        "AI provider request failed status=%s category=%s model=%s base_url_host=%s error_type=%s",
         status if status is not None else "unavailable",
         category,
         re.sub(r"[\r\n\t]", "_", model)[:120] or "unset",
         hostname[:253] or "invalid",
+        error_type if error_type in SAFE_PROVIDER_ERROR_TYPES else "provider_error",
     )
 
 
@@ -204,10 +247,12 @@ def _request_provider_analysis(request: Request, model: str, hostname: str) -> M
                 body = json.loads(response.read().decode("utf-8"))
             break
         except HTTPError as exc:
+            error_type = "http_error"
             if exc.code == 429:
-                quota = _is_quota_error(exc)
+                identifiers, provider_message, error_type = _provider_error_fields(exc)
+                quota = _is_quota_error(identifiers, provider_message)
                 code = "AI_QUOTA_EXCEEDED" if quota else "AI_RATE_LIMITED"
-                _log_provider_failure(exc.code, code, model, hostname)
+                _log_provider_failure(exc.code, code, model, hostname, error_type)
                 if not quota and attempt < MAX_RATE_LIMIT_RETRIES:
                     time.sleep(0.25 * (2 ** attempt))
                     continue
@@ -221,7 +266,7 @@ def _request_provider_analysis(request: Request, model: str, hostname: str) -> M
             elif exc.code == 404:
                 code, safe_message = "AI_MODEL_ERROR", "The AI provider could not find the configured model or endpoint. Check AI_MODEL and AI_API_BASE_URL."
             elif exc.code == 400:
-                identifiers, provider_message = _provider_error_fields(exc)
+                identifiers, provider_message, error_type = _provider_error_fields(exc)
                 if any(marker in identifiers or marker in provider_message for marker in (
                     "model_not_found", "invalid_model", "model_not_supported", "model does not exist", "model not found"
                 )):
@@ -234,34 +279,47 @@ def _request_provider_analysis(request: Request, model: str, hostname: str) -> M
                 code, safe_message = "AI_PROVIDER_ERROR", "The AI provider is temporarily unavailable. Try again shortly."
             else:
                 code, safe_message = "AI_PROVIDER_ERROR", "The AI provider rejected the request. Check the provider URL and model compatibility."
-            _log_provider_failure(exc.code, code, model, hostname)
+                error_type = "http_error"
+            _log_provider_failure(exc.code, code, model, hostname, error_type)
             raise AnalysisProviderError(code, safe_message) from None
         except (TimeoutError, socket.timeout):
-            _log_provider_failure(None, "AI_TIMEOUT", model, hostname)
+            _log_provider_failure(None, "AI_TIMEOUT", model, hostname, "timeout_error")
             raise AnalysisProviderError("AI_TIMEOUT", "The AI provider did not respond in time.") from None
         except URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
                 code, safe_message = "AI_TIMEOUT", "The AI provider did not respond in time."
             else:
                 code, safe_message = "AI_NETWORK_ERROR", "Could not reach the configured AI provider. Check AI_API_BASE_URL and try again."
-            _log_provider_failure(None, code, model, hostname)
+            _log_provider_failure(None, code, model, hostname, "url_error")
             raise AnalysisProviderError(code, safe_message) from None
         except OSError:
-            _log_provider_failure(None, "AI_NETWORK_ERROR", model, hostname)
+            _log_provider_failure(None, "AI_NETWORK_ERROR", model, hostname, "os_error")
             raise AnalysisProviderError("AI_NETWORK_ERROR", "Could not reach the configured AI provider. Check AI_API_BASE_URL and try again.") from None
         except (json.JSONDecodeError, UnicodeDecodeError):
-            _log_provider_failure(provider_status, "AI_PROVIDER_ERROR", model, hostname)
+            _log_provider_failure(provider_status, "AI_PROVIDER_ERROR", model, hostname, "invalid_response_format")
             raise AnalysisProviderError("AI_PROVIDER_ERROR", "The AI provider returned an invalid response.") from None
 
     try:
         content = body["choices"][0]["message"]["content"]
         if isinstance(content, list):
-            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+            content = "".join(
+                part["text"]
+                for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("empty provider message content")
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         analysis = MessageAnalysis.model_validate_json(content)
         return analysis.model_copy(update={"demo_mode": False, "analysis_source": "ai", "fallback_reason": None})
     except (KeyError, IndexError, TypeError, AttributeError, ValidationError, json.JSONDecodeError):
-        _log_provider_failure(provider_status, "AI_PROVIDER_ERROR", model, hostname)
+        _log_provider_failure(provider_status, "AI_PROVIDER_ERROR", model, hostname, "invalid_response_format")
+        raise AnalysisProviderError(
+            "AI_PROVIDER_ERROR",
+            "The AI provider response did not match the required analysis format. Check that the model supports JSON responses.",
+        ) from None
+    except ValueError:
+        _log_provider_failure(provider_status, "AI_PROVIDER_ERROR", model, hostname, "invalid_response_format")
         raise AnalysisProviderError(
             "AI_PROVIDER_ERROR",
             "The AI provider response did not match the required analysis format. Check that the model supports JSON responses.",
@@ -287,11 +345,12 @@ def analyze_with_ai(message: str) -> MessageAnalysis:
             "AI_API_KEY must be an AI-provider credential. Do not use a Supabase project URL, anon/publishable key, or service-role key.",
         )
 
-    schema = MessageAnalysis.model_json_schema()
+    endpoint, hostname = _provider_endpoint(settings.ai_api_base_url)
+    is_gemini = hostname == "generativelanguage.googleapis.com"
+    is_gemini_3 = is_gemini and re.match(r"^gemini-3(?:[.-]|$)", model, re.IGNORECASE) is not None
+    schema = GEMINI_OUTPUT_SCHEMA if is_gemini else MessageAnalysis.model_json_schema()
     payload = {
         "model": model,
-        "temperature": 0.1,
-        "response_format": {"type": "json_object"},
         "messages": [
             {
                 "role": "system",
@@ -303,7 +362,21 @@ def analyze_with_ai(message: str) -> MessageAnalysis:
             {"role": "user", "content": json.dumps({"suspicious_message": message})},
         ],
     }
-    endpoint, hostname = _provider_endpoint(settings.ai_api_base_url)
+    if is_gemini:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "scamshield_message_analysis",
+                "strict": True,
+                "schema": GEMINI_OUTPUT_SCHEMA,
+            },
+        }
+    else:
+        payload["temperature"] = 0.1
+        payload["response_format"] = {"type": "json_object"}
+    if is_gemini and not is_gemini_3:
+        # Preserve existing Gemini 2.x sampling behavior; Gemini 3.x uses its default.
+        payload["temperature"] = 0.1
     request = Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
