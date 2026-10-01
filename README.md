@@ -229,6 +229,36 @@ FastAPI's generated schema and interactive docs are at `/docs` while the backend
 
 ## Screenshots
 
-No screenshots are included yet. Add screenshots captured from a running application here when they are available.
+### Dashboard / Security Overview
+
+![ScamShield AI Dashboard](screenshots/01-dashboard.png)
+
+The dashboard provides a quick overview of scan activity, risk levels, recent scans, and shortcuts to the three main scanners.
+
+### Authentication
+
+![ScamShield AI Login](screenshots/02-login.png)
+
+Secure sign-in and account access are handled through Supabase Auth when authentication is configured.
+
+### Message Scanner
+
+![ScamShield AI Message Scanner](screenshots/03-message-scanner.png)
+
+Paste a suspicious email, text message, or direct message to analyze warning signs and receive structured risk guidance.
+
+### Screenshot Scanner
+
+![ScamShield AI Screenshot Scanner](screenshots/04-screenshot-scanner.png)
+
+Upload a screenshot and extract its text locally in the browser with Tesseract.js before sending the extracted text for analysis.
+
+### URL Checker
+
+![ScamShield AI URL Checker](screenshots/05-url-checker.png)
+
+Analyze a suspicious URL using structural heuristics without opening, crawling, or visiting the submitted destination.
+
+> **Note:** These screenshots were captured from the running ScamShield AI application. A scan is a helpful signal, not proof that a message or website is safe or malicious.
 
 <!-- Vercel deployment trigger -->
