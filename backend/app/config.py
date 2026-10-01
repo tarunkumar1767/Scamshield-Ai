@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,6 +7,7 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_api_base_url: str = "https://api.openai.com/v1"
     ai_model: str = ""
+    ai_request_timeout_seconds: float = Field(default=60, gt=0, le=300)
     frontend_url: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)

@@ -242,7 +242,7 @@ def _request_provider_analysis(request: Request, model: str, hostname: str) -> M
     for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
         provider_status: int | None = None
         try:
-            with urlopen(request, timeout=45) as response:
+            with urlopen(request, timeout=settings.ai_request_timeout_seconds) as response:
                 provider_status = getattr(response, "status", getattr(response, "code", 200))
                 body = json.loads(response.read().decode("utf-8"))
             break

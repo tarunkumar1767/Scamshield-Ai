@@ -3,6 +3,7 @@ import json
 import logging
 import unittest
 from contextlib import ExitStack
+from unittest.mock import call
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -30,6 +31,7 @@ class GeminiRequestTests(unittest.TestCase):
         self.settings_patches = ExitStack()
         self.settings_patches.enter_context(patch.object(analyzer.settings, "ai_api_key", "test-provider-key"))
         self.settings_patches.enter_context(patch.object(analyzer.settings, "ai_model", "gemini-3.8-flash"))
+        self.settings_patches.enter_context(patch.object(analyzer.settings, "ai_request_timeout_seconds", 60))
         self.settings_patches.enter_context(patch.object(
             analyzer.settings,
             "ai_api_base_url",
@@ -68,6 +70,7 @@ class GeminiRequestTests(unittest.TestCase):
 
         self.assertEqual(captured["url"], "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
         self.assertEqual(captured["payload"]["model"], "gemini-3.8-flash")
+        self.assertEqual(captured["timeout"], 60)
         self.assertNotIn("temperature", captured["payload"])
         self.assertNotIn("response_format", captured["payload"])
         prompt = captured["payload"]["messages"][0]["content"]
@@ -119,6 +122,35 @@ class GeminiRequestTests(unittest.TestCase):
         self.assertEqual(result.fallback_reason, "AI_QUOTA_EXCEEDED")
         self.assertFalse(result.demo_mode)
         self.assertEqual(result.risk_level, "high")
+
+    def test_timeout_uses_configured_value_and_preserves_fallback(self):
+        with patch.object(analyzer, "urlopen", side_effect=TimeoutError()) as provider:
+            result = analyzer.analyze_with_ai("Urgent: send your OTP immediately")
+
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(provider.call_args.kwargs["timeout"], 60)
+        self.assertEqual(result.analysis_source, "fallback")
+        self.assertEqual(result.fallback_reason, "AI_TIMEOUT")
+        self.assertFalse(result.demo_mode)
+
+    def test_rate_limit_retry_count_and_backoff_are_preserved(self):
+        rate_limit_body = json.dumps({
+            "error": {"type": "rate_limit_error", "message": "Temporary rate limit"}
+        }).encode("utf-8")
+        rate_limits = [
+            HTTPError("https://provider.invalid", 429, "Too Many Requests", None, io.BytesIO(rate_limit_body))
+            for _ in range(2)
+        ]
+        response = FakeResponse({"choices": [{"message": {"content": json.dumps(self.valid_analysis())}}]})
+
+        with patch.object(analyzer, "urlopen", side_effect=[*rate_limits, response]) as provider:
+            with patch.object(analyzer.time, "sleep") as sleep:
+                result = analyzer.analyze_with_ai("Harmless message")
+
+        self.assertEqual(provider.call_count, analyzer.MAX_RATE_LIMIT_RETRIES + 1)
+        self.assertEqual([entry.kwargs["timeout"] for entry in provider.call_args_list], [60, 60, 60])
+        self.assertEqual(sleep.call_args_list, [call(0.25), call(0.5)])
+        self.assertEqual(result.analysis_source, "ai")
 
 
 if __name__ == "__main__":
