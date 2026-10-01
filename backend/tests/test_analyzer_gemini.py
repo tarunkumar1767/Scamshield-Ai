@@ -69,9 +69,10 @@ class GeminiRequestTests(unittest.TestCase):
         self.assertEqual(captured["url"], "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
         self.assertEqual(captured["payload"]["model"], "gemini-3.8-flash")
         self.assertNotIn("temperature", captured["payload"])
-        response_format = captured["payload"]["response_format"]
-        self.assertEqual(response_format["type"], "json_schema")
-        self.assertEqual(response_format["json_schema"]["schema"]["required"], analyzer.GEMINI_OUTPUT_SCHEMA["required"])
+        self.assertNotIn("response_format", captured["payload"])
+        prompt = captured["payload"]["messages"][0]["content"]
+        self.assertIn('"risk_score"', prompt)
+        self.assertIn("required", prompt)
         self.assertEqual(result.risk_level, "high")
         self.assertEqual(result.analysis_source, "ai")
         self.assertFalse(result.demo_mode)
@@ -96,6 +97,14 @@ class GeminiRequestTests(unittest.TestCase):
         self.assertNotIn("test-provider-key", diagnostic)
         self.assertNotIn("private user message", diagnostic)
         self.assertNotIn("Authorization", diagnostic)
+
+    def test_invalid_gemini_content_is_rejected_instead_of_reported_as_ai_success(self):
+        response = FakeResponse({"choices": [{"message": {"content": '{"risk_level":"critical"}'}}]})
+        with patch.object(analyzer, "urlopen", return_value=response):
+            with self.assertRaises(analyzer.AnalysisProviderError) as raised:
+                analyzer.analyze_with_ai("Harmless content")
+
+        self.assertEqual(raised.exception.code, "AI_PROVIDER_ERROR")
 
     def test_rate_limit_quota_uses_existing_fallback(self):
         error_body = json.dumps({

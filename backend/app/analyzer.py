@@ -363,20 +363,14 @@ def analyze_with_ai(message: str) -> MessageAnalysis:
         ],
     }
     if is_gemini:
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "scamshield_message_analysis",
-                "strict": True,
-                "schema": GEMINI_OUTPUT_SCHEMA,
-            },
-        }
+        # The documented Gemini OpenAI-compatible chat.completions.create request
+        # uses model + messages; schema is prompted and validated locally instead
+        # of sending OpenAI response_format extensions on the raw HTTP request.
+        if not is_gemini_3:
+            payload["temperature"] = 0.1
     else:
         payload["temperature"] = 0.1
         payload["response_format"] = {"type": "json_object"}
-    if is_gemini and not is_gemini_3:
-        # Preserve existing Gemini 2.x sampling behavior; Gemini 3.x uses its default.
-        payload["temperature"] = 0.1
     request = Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
