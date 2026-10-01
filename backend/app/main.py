@@ -56,7 +56,7 @@ def _analyze_message_text(message: str) -> MessageAnalysis:
         logger.error("Unexpected analysis provider failure (%s)", type(exc).__name__)
         raise HTTPException(
             status_code=503,
-            detail={"code": "ai_provider_error", "message": "AI analysis is temporarily unavailable. Check the backend configuration or try again shortly."},
+            detail={"code": "AI_PROVIDER_ERROR", "message": "AI analysis is temporarily unavailable. Check the backend configuration or try again shortly."},
         ) from exc
     return analysis
 

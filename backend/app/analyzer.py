@@ -1,13 +1,21 @@
 import base64
 import json
+import logging
 import re
+import socket
+import time
 from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field, ValidationError
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
+FALLBACK_CODES = {"AI_RATE_LIMITED", "AI_QUOTA_EXCEEDED", "AI_TIMEOUT", "AI_NETWORK_ERROR"}
+MAX_RATE_LIMIT_RETRIES = 2
 
 
 class AnalysisProviderError(RuntimeError):
@@ -48,6 +56,8 @@ class MessageAnalysis(BaseModel):
     recommended_actions: list[str]
     safety_tips: list[str]
     demo_mode: bool = False
+    analysis_source: Literal["ai", "demo", "fallback"] = "ai"
+    fallback_reason: Literal["AI_RATE_LIMITED", "AI_QUOTA_EXCEEDED", "AI_TIMEOUT", "AI_NETWORK_ERROR"] | None = None
 
 
 SIGNALS = [
@@ -110,7 +120,152 @@ def analyze_demo(message: str) -> MessageAnalysis:
         recommended_actions=actions,
         safety_tips=tips,
         demo_mode=True,
+        analysis_source="demo",
     )
+
+
+def analyze_fallback(message: str, reason: str) -> MessageAnalysis:
+    """Return the deterministic safety assessment, explicitly labeled as a fallback."""
+    heuristic = analyze_demo(message)
+    summary = (
+        "Fallback safety analysis found several common scam signals. Treat this message as suspicious and verify the sender independently."
+        if heuristic.risk_level == "high" else
+        "Fallback safety analysis found wording sometimes used in scams. Verify the request before responding."
+        if heuristic.risk_level == "medium" else
+        "Fallback safety analysis did not find strong known scam signals. This does not prove the message or sender is safe."
+    )
+    return heuristic.model_copy(update={
+        "summary": summary,
+        "demo_mode": False,
+        "analysis_source": "fallback",
+        "fallback_reason": reason,
+    })
+
+
+def _provider_endpoint(base_url: str) -> tuple[str, str]:
+    """Normalize an OpenAI-compatible base URL and return endpoint plus safe hostname."""
+    try:
+        parsed = urlsplit(base_url.strip() or "https://api.openai.com/v1")
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("invalid base URL")
+        parsed.port  # Validate malformed/out-of-range ports before creating the request.
+        path = re.sub(r"/v1(?=/v1(?:/|$))", "", parsed.path.rstrip("/"), flags=re.IGNORECASE)
+        if path.endswith("/chat/completions"):
+            endpoint_path = path
+        else:
+            if not path:
+                path = "/v1"
+            endpoint_path = f"{path}/chat/completions"
+        endpoint = urlunsplit((parsed.scheme, parsed.netloc, endpoint_path, "", ""))
+        return endpoint, parsed.hostname.lower()
+    except (TypeError, ValueError) as exc:
+        raise AnalysisProviderError("AI_PROVIDER_ERROR", "AI_API_BASE_URL must be a valid HTTP or HTTPS provider URL.") from exc
+
+
+def _provider_error_fields(error: HTTPError) -> tuple[str, str]:
+    """Read only enough of an error payload to classify it; never return/log its text."""
+    try:
+        payload = json.loads(error.read(8192).decode("utf-8", errors="replace"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return "", ""
+    detail = payload.get("error", payload) if isinstance(payload, dict) else {}
+    if not isinstance(detail, dict):
+        return "", ""
+    code = str(detail.get("code", "")).lower()[:100]
+    error_type = str(detail.get("type", "")).lower()[:100]
+    message = str(detail.get("message", "")).lower()[:1000]
+    return f"{code} {error_type}", message
+
+
+def _is_quota_error(error: HTTPError) -> bool:
+    identifiers, message = _provider_error_fields(error)
+    quota_markers = ("insufficient_quota", "billing_hard_limit", "quota_exceeded", "billing_limit")
+    return any(marker in identifiers or marker in message for marker in quota_markers) or any(
+        phrase in message for phrase in ("billing limit", "usage limit", "quota has been", "quota is exceeded", "quota exceeded", "exceeded your current quota", "insufficient quota")
+    )
+
+
+def _log_provider_failure(status: int | None, category: str, model: str, hostname: str) -> None:
+    logger.warning(
+        "AI provider request failed status=%s category=%s model=%s base_url_host=%s",
+        status if status is not None else "unavailable",
+        category,
+        re.sub(r"[\r\n\t]", "_", model)[:120] or "unset",
+        hostname[:253] or "invalid",
+    )
+
+
+def _request_provider_analysis(request: Request, model: str, hostname: str) -> MessageAnalysis:
+    for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+        provider_status: int | None = None
+        try:
+            with urlopen(request, timeout=45) as response:
+                provider_status = getattr(response, "status", getattr(response, "code", 200))
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except HTTPError as exc:
+            if exc.code == 429:
+                quota = _is_quota_error(exc)
+                code = "AI_QUOTA_EXCEEDED" if quota else "AI_RATE_LIMITED"
+                _log_provider_failure(exc.code, code, model, hostname)
+                if not quota and attempt < MAX_RATE_LIMIT_RETRIES:
+                    time.sleep(0.25 * (2 ** attempt))
+                    continue
+                message_text = (
+                    "The configured AI provider account has reached its usage limit."
+                    if quota else "The AI provider is temporarily rate limiting requests. Please retry shortly."
+                )
+                raise AnalysisProviderError(code, message_text) from None
+            if exc.code in (401, 403):
+                code, safe_message = "AI_AUTH_FAILED", "The AI provider rejected authentication. Check AI_API_KEY on the backend."
+            elif exc.code == 404:
+                code, safe_message = "AI_MODEL_ERROR", "The AI provider could not find the configured model or endpoint. Check AI_MODEL and AI_API_BASE_URL."
+            elif exc.code == 400:
+                identifiers, provider_message = _provider_error_fields(exc)
+                if any(marker in identifiers or marker in provider_message for marker in (
+                    "model_not_found", "invalid_model", "model_not_supported", "model does not exist", "model not found"
+                )):
+                    code, safe_message = "AI_MODEL_ERROR", "The AI provider does not support the configured model. Check AI_MODEL."
+                else:
+                    code, safe_message = "AI_PROVIDER_ERROR", "The AI provider rejected the request. Check the provider URL and model compatibility."
+            elif exc.code in (408, 504):
+                code, safe_message = "AI_TIMEOUT", "The AI provider did not respond in time."
+            elif exc.code >= 500:
+                code, safe_message = "AI_PROVIDER_ERROR", "The AI provider is temporarily unavailable. Try again shortly."
+            else:
+                code, safe_message = "AI_PROVIDER_ERROR", "The AI provider rejected the request. Check the provider URL and model compatibility."
+            _log_provider_failure(exc.code, code, model, hostname)
+            raise AnalysisProviderError(code, safe_message) from None
+        except (TimeoutError, socket.timeout):
+            _log_provider_failure(None, "AI_TIMEOUT", model, hostname)
+            raise AnalysisProviderError("AI_TIMEOUT", "The AI provider did not respond in time.") from None
+        except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                code, safe_message = "AI_TIMEOUT", "The AI provider did not respond in time."
+            else:
+                code, safe_message = "AI_NETWORK_ERROR", "Could not reach the configured AI provider. Check AI_API_BASE_URL and try again."
+            _log_provider_failure(None, code, model, hostname)
+            raise AnalysisProviderError(code, safe_message) from None
+        except OSError:
+            _log_provider_failure(None, "AI_NETWORK_ERROR", model, hostname)
+            raise AnalysisProviderError("AI_NETWORK_ERROR", "Could not reach the configured AI provider. Check AI_API_BASE_URL and try again.") from None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _log_provider_failure(provider_status, "AI_PROVIDER_ERROR", model, hostname)
+            raise AnalysisProviderError("AI_PROVIDER_ERROR", "The AI provider returned an invalid response.") from None
+
+    try:
+        content = body["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
+        analysis = MessageAnalysis.model_validate_json(content)
+        return analysis.model_copy(update={"demo_mode": False, "analysis_source": "ai", "fallback_reason": None})
+    except (KeyError, IndexError, TypeError, AttributeError, ValidationError, json.JSONDecodeError):
+        _log_provider_failure(provider_status, "AI_PROVIDER_ERROR", model, hostname)
+        raise AnalysisProviderError(
+            "AI_PROVIDER_ERROR",
+            "The AI provider response did not match the required analysis format. Check that the model supports JSON responses.",
+        ) from None
 
 
 def analyze_with_ai(message: str) -> MessageAnalysis:
@@ -118,17 +273,17 @@ def analyze_with_ai(message: str) -> MessageAnalysis:
     model = settings.ai_model.strip()
     if not api_key:
         raise AnalysisProviderError(
-            "ai_configuration_missing",
+            "AI_CONFIGURATION_MISSING",
             "AI_API_KEY is missing from the backend environment. Set it in Render for this deployment, or enable DEMO_MODE.",
         )
     if not model:
         raise AnalysisProviderError(
-            "ai_configuration_missing",
+            "AI_CONFIGURATION_MISSING",
             "AI_MODEL is missing from the backend environment. Set a supported model in Render, or enable DEMO_MODE.",
         )
     if api_key.lower().startswith(("http://", "https://")) or "supabase." in api_key.lower() or _is_supabase_key(api_key):
         raise AnalysisProviderError(
-            "ai_configuration_invalid",
+            "AI_AUTH_FAILED",
             "AI_API_KEY must be an AI-provider credential. Do not use a Supabase project URL, anon/publishable key, or service-role key.",
         )
 
@@ -148,8 +303,7 @@ def analyze_with_ai(message: str) -> MessageAnalysis:
             {"role": "user", "content": json.dumps({"suspicious_message": message})},
         ],
     }
-    base_url = settings.ai_api_base_url.strip() or "https://api.openai.com/v1"
-    endpoint = base_url.rstrip("/") + "/chat/completions"
+    endpoint, hostname = _provider_endpoint(settings.ai_api_base_url)
     request = Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
@@ -157,41 +311,8 @@ def analyze_with_ai(message: str) -> MessageAnalysis:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=45) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        if exc.code in (401, 403):
-            code, message = "ai_authentication_failed", "The configured AI provider rejected authentication. Check AI_API_KEY on the backend."
-        elif exc.code == 404:
-            code, message = "ai_model_or_endpoint_not_found", "The AI provider could not find the configured model or endpoint. Check AI_MODEL and AI_API_BASE_URL."
-        elif exc.code == 429:
-            code, message = "ai_rate_limited", "The AI provider is rate limiting requests. Wait briefly and try again."
-        elif exc.code in (408, 504):
-            code, message = "ai_provider_timeout", "The AI provider did not respond in time. Try again shortly."
-        elif exc.code >= 500:
-            code, message = "ai_provider_unavailable", "The AI provider is temporarily unavailable. Try again shortly."
-        else:
-            code, message = "ai_provider_request_rejected", "The AI provider rejected the request. Check AI_API_BASE_URL and confirm the configured model supports the Chat Completions JSON response format."
-        raise AnalysisProviderError(code, message) from exc
-    except (URLError, TimeoutError) as exc:
-        raise AnalysisProviderError(
-            "ai_provider_unreachable",
-            "Could not reach the configured AI provider. Check AI_API_BASE_URL and try again.",
-        ) from exc
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise AnalysisProviderError(
-            "ai_provider_invalid_response",
-            "The AI provider returned an invalid response. Try again shortly.",
-        ) from exc
-
-    try:
-        content = body["choices"][0]["message"]["content"]
-        if isinstance(content, list):
-            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
-        return MessageAnalysis.model_validate_json(content)
-    except (KeyError, IndexError, TypeError, AttributeError, ValidationError, json.JSONDecodeError) as exc:
-        raise AnalysisProviderError(
-            "ai_provider_invalid_response",
-            "The AI provider response did not match the required analysis format. Check that the configured model supports JSON responses.",
-        ) from exc
+        return _request_provider_analysis(request, model, hostname)
+    except AnalysisProviderError as exc:
+        if exc.code in FALLBACK_CODES:
+            return analyze_fallback(message, exc.code)
+        raise

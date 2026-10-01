@@ -117,7 +117,7 @@ AI_API_BASE_URL=https://api.openai.com/v1
 AI_MODEL=your-supported-model
 ```
 
-The backend sends message text to the configured provider when this mode is enabled. It validates the returned JSON against the expected schema and rejects obvious Supabase URLs/keys used as `AI_API_KEY`. If configuration or the provider fails, the endpoint returns a safe structured error code and a user-facing explanation; it never returns credentials, provider response bodies, or stack traces. Return to `DEMO_MODE=true` to work without a provider.
+The backend sends message text to the configured provider when this mode is enabled. It validates the returned JSON against the expected schema and rejects obvious Supabase URLs/keys used as `AI_API_KEY`. Temporary HTTP 429 rate limits are retried at most twice with exponential backoff; quota errors are not retried. Rate limits, quota exhaustion, timeouts, and network failures return deterministic heuristic analysis labeled `analysis_source: "fallback"` while keeping `demo_mode: false`. The UI identifies this result as a fallback, not as LLM-generated. Authentication, model, malformed-response, and other provider errors return safe structured error codes. Provider bodies, credentials, and stack traces are never returned to the browser. Health checks report configuration presence only and do not make live provider requests.
 
 ## Deployment
 
